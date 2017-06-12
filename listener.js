@@ -2,6 +2,13 @@ const devp2p = require('ethereumjs-devp2p')
 const EthereumTx = require('ethereumjs-tx')
 const EthereumBlock = require('ethereumjs-block')
 const LRUCache = require('lru-cache')
+const config = require('./configs.json');
+const low = require('lowdb');
+const db = low('db.json');
+var Web3 = require('web3');
+var web3 = new Web3();
+const TABLE_NAME = 'hashes';
+web3.setProvider(new web3.providers.IpcProvider(config.web3.ipc, require('net')));
 const ms = require('ms')
 const assert = require('assert')
 const { randomBytes } = require('crypto')
@@ -203,6 +210,9 @@ rlpx.on('peer:error', (peer, err) => {
 let txCallback = (tx) => {}
 
 function startListening(_txCallback) {
+    let _obj = {};
+    _obj[TABLE_NAME] = [];
+    db.defaults(_obj).write()
     txCallback = _txCallback
     for (let bootnode of BOOTNODES) {
         dpt.bootstrap(bootnode).catch((err) => {
@@ -211,12 +221,13 @@ function startListening(_txCallback) {
     }
 }
 
-const txCache = new LRUCache({ maxAge: ms('1d') })
+const txCache = new LRUCache({ max: 1000 })
 
-function onNewTx(tx, peer) {
+function onNewTx(tx) {
     const txHashHex = '0x' + tx.hash().toString('hex')
     if (txCache.has(txHashHex)) return
-    txCache.set(txHashHex, tx.serialize().toString('hex'))
+    db.get(TABLE_NAME).push({ hash: txHashHex, tx: tx.serialize().toString('hex'), time: new Date().getTime() }).write();
+    txCache.set(txHashHex, true)
     txCallback(tx)
 }
 const blocksCache = new LRUCache({ max: 100 })
@@ -230,8 +241,8 @@ function onNewBlock(block, peer) {
     let _count = 0;
     for (let tx of block.transactions) {
         let _hash = '0x' + tx.hash().toString('hex');
-        if (txCache.has(_hash)) _count++;
-        txCache.del(_hash);
+        let deleted = db.get(TABLE_NAME).remove({ hash: _hash }).write();
+        _count += deleted.length;
     }
     log.success(`${_count} Transactions were mined from the pool`)
 }
@@ -265,32 +276,60 @@ setInterval(() => {
     log.info(`Difficulty ${_curTd.toString()} bestHash ${bestHash.toString('hex')}`)
 }, ms('10s'))
 setInterval(() => {
-    let txArr = [];
-    txCache.forEach((value, key) => {
-        txArr.push(rlp.decode(Buffer.from(value, 'hex')));
-    });
-    // if (txArr.length > 1000)
-    //     txArr.push(rlp.decode(Buffer.from('f869378504a817c800825208947cb57b5a97eabe94205c07890be4c1ad31e486a885e8d4a510008025a0336c33f87edbc5e5139a537cc85975300e560426ecb76a6879cc78991ffa306aa06bd05781aaca134bd9c4264cdd5dc90432cd6df65278d917856c9c4fcd4f6c61', 'hex')));
-
-    if (!txArr.length) return;
-    let peers = rlpx.getPeers();
-    log.info(`Num Peers ${peers.length} num TXs ${txArr.length}`)
-    for (let id in peers) {
-        const _eth = peers[id].getProtocols()[0];
-        _eth.sendStatus({
-            networkId: 1,
-            td: totalDifficulty,
-            bestHash: bestHash,
-            genesisHash: genesisHash
-        })
-        let i, j, temparray, chunk = 40;
-        for (i = 0, j = txArr.length; i < j; i += chunk) {
-            temparray = txArr.slice(i, i + chunk);
-            _eth.sendMessage(devp2p.ETH.MESSAGE_CODES.TX, temparray);
+    let pendingTransactions = db.get(TABLE_NAME).value();
+    if (!pendingTransactions.length) return;
+    let txData = {
+        processed: 0,
+        stillPending: []
+    }
+    let onTxCallback = (tx, mined) => {
+        txData.processed++;
+        let curTime = new Date().getTime();
+        if (mined || tx.time < (curTime - ms('6h'))) {
+            db.get(TABLE_NAME).remove({ hash: tx.hash }).write();
+        } else {
+            txData.stillPending.push(tx);
+        }
+        if (txData.processed != pendingTransactions.length) return;
+        if (txData.stillPending.length) {
+            log.info(`${txData.stillPending.length} Transactions needs to be rebroadcasted`);
+            let txArr = txData.stillPending.map((val) => {
+                return rlp.decode(Buffer.from(val.tx, 'hex'));
+            });
+            let peers = rlpx.getPeers();
+            log.info(`Num Peers ${peers.length} num TXs ${txArr.length}`)
+            for (let id in peers) {
+                const _eth = peers[id].getProtocols()[0];
+                _eth.sendStatus({
+                    networkId: 1,
+                    td: totalDifficulty,
+                    bestHash: bestHash,
+                    genesisHash: genesisHash
+                })
+                let i, j, temparray, chunk = 40;
+                for (i = 0, j = txArr.length; i < j; i += chunk) {
+                    temparray = txArr.slice(i, i + chunk);
+                    _eth.sendMessage(devp2p.ETH.MESSAGE_CODES.TX, temparray);
+                }
+            }
         }
     }
-}, ms('10s'));
+    let checkTx = (_tx) => {
+        web3.eth.getTransaction(_tx.hash, (err, data) => {
+            if (err) onTxCallback(_tx, false);
+            else {
+                if (data && data.blockNumber) onTxCallback(_tx, true);
+                else onTxCallback(_tx, false);
+            }
+        });
+    }
+    for (let i in pendingTransactions) {
+        checkTx(pendingTransactions[i]);
+    }
+}, ms('60s'));
 module.exports = {
     startListening: startListening,
-    deleteTxFromCache: deleteTxFromCache
+    deleteTxFromCache: deleteTxFromCache,
+    isValidTx: isValidTx,
+    onNewTx: onNewTx
 }
