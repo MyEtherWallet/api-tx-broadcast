@@ -10,7 +10,7 @@ var options = {
     strict: true
 };
 var serv = new rpc.Server(options);
-serv.addMethod('new_tx', function(para, callback) {
+serv.addMethod('eth_sendRawTransaction', function(para, callback) {
     var error, result;
     if (para.length === 1) {
         try {
