@@ -255,6 +255,17 @@ function isValidTx(tx) {
     return tx.validate(false)
 }
 
+function isTXReallyValid(tx, callback) {
+    web3.eth.sendRawTransaction('0x' + tx.serialize().toString('hex'), (err, data) => {
+        console.log(err.toString(), err.toString().indexOf("known"));
+        if (err) {
+            if (err.toString().indexOf("known") > -1) callback(true);
+            else callback(false);
+        }
+        callback(true);
+    });
+}
+
 function isValidBlock(block, cb) {
     if (!block.validateUnclesHash()) cb(false)
     if (!block.transactions.every(isValidTx)) cb(false)
@@ -316,17 +327,19 @@ setInterval(() => {
     }
     let checkTx = (_tx) => {
         web3.eth.getTransaction(_tx.hash, (err, data) => {
-            if (err) onTxCallback(_tx, false);
+            if (data && data.blockNumber) onTxCallback(_tx, true);
             else {
-                if (data && data.blockNumber) onTxCallback(_tx, true);
-                else onTxCallback(_tx, false);
+                isTXReallyValid(new EthereumTx('0x' + _tx.tx), (valid) => {
+                    if (valid) onTxCallback(_tx, false);
+                    else onTxCallback(_tx, true);
+                })
             }
         });
     }
     for (let i in pendingTransactions) {
         checkTx(pendingTransactions[i]);
     }
-}, ms('60s'));
+}, ms('10s'));
 module.exports = {
     startListening: startListening,
     deleteTxFromCache: deleteTxFromCache,
