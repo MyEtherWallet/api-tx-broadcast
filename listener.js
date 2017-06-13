@@ -257,7 +257,6 @@ function isValidTx(tx) {
 
 function isTXReallyValid(tx, callback) {
     web3.eth.sendRawTransaction('0x' + tx.serialize().toString('hex'), (err, data) => {
-        console.log(err.toString(), err.toString().indexOf("known"));
         if (err) {
             if (err.toString().indexOf("known") > -1) callback(true);
             else callback(false);
@@ -298,7 +297,7 @@ setInterval(() => {
         let curTime = new Date().getTime();
         if (mined || tx.time < (curTime - ms('6h'))) {
             db.get(TABLE_NAME).remove({ hash: tx.hash }).write();
-        } else {
+        } else if(tx.time < (curTime - ms('60s'))) {
             txData.stillPending.push(tx);
         }
         if (txData.processed != pendingTransactions.length) return;
@@ -339,7 +338,7 @@ setInterval(() => {
     for (let i in pendingTransactions) {
         checkTx(pendingTransactions[i]);
     }
-}, ms('10s'));
+}, ms('60s'));
 module.exports = {
     startListening: startListening,
     deleteTxFromCache: deleteTxFromCache,
